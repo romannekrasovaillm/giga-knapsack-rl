@@ -52,6 +52,12 @@ def main():
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-env-steps", type=int, default=8)
 
+    # vLLM server
+    parser.add_argument("--vllm-url", default=None,
+                        help="vLLM server URL (e.g. http://localhost:8000/v1)")
+    parser.add_argument("--vllm-model-name", default=None,
+                        help="Model name on vLLM server (auto-detected if omitted)")
+
     # Data
     parser.add_argument("--data-cache-dir", default="./data/raw")
     parser.add_argument("--max-samples", type=int, default=None)
@@ -96,6 +102,8 @@ def main():
         "log_dir": args.log_dir,
         "save_every": args.save_every,
         "use_wandb": args.use_wandb,
+        "vllm_url": args.vllm_url,
+        "vllm_model_name": args.vllm_model_name,
         "device": "cuda",
     }
 

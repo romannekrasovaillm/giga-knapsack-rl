@@ -270,6 +270,29 @@ class TrainingLogger:
         with open(self.metrics_file, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
+    def log_rollout_details(self, iteration: int, details: Dict[str, Any]):
+        """Log detailed rollout information to file."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "phase": "rollout_details",
+            "iteration": iteration,
+            **details,
+        }
+        with open(self.metrics_file, "a") as f:
+            f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+        if self.wandb_run:
+            try:
+                import wandb
+                wandb.log({
+                    "rollouts/n_rollouts": details.get("n_rollouts", 0),
+                    "rollouts/n_success": details.get("n_success", 0),
+                    "rollouts/total_tokens": details.get("total_tokens", 0),
+                    "rollouts/gen_time": details.get("gen_time", 0),
+                }, step=iteration)
+            except Exception:
+                pass
+
     def log_loss(self, iteration: int, loss_metrics: Dict[str, float]):
         """Log loss metrics."""
         parts = [f"[LOSS] iter={iteration}"]
