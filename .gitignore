@@ -6,8 +6,8 @@ dist/
 build/
 *.egg
 
-# Data
-data/
+# Data (downloaded datasets, not src/data/)
+/data/
 *.jsonl
 
 # Checkpoints
