@@ -164,17 +164,24 @@ class VLLMRolloutGenerator:
             if max_new <= 0:
                 break
 
-            async with sem:
-                completion = await self.async_client.completions.create(
-                    model=self.model_name,
-                    prompt=conversation,
-                    max_tokens=max_new,
-                    temperature=temperature,
-                    top_p=top_p,
+            try:
+                async with sem:
+                    completion = await self.async_client.completions.create(
+                        model=self.model_name,
+                        prompt=conversation,
+                        max_tokens=max_new,
+                        temperature=temperature,
+                        top_p=top_p,
+                    )
+                text = completion.choices[0].text
+                n_tok = completion.usage.completion_tokens if completion.usage else len(text.split())
+            except Exception as e:
+                logger.warning(
+                    f"vLLM error (prompt={prompt_idx} roll={rollout_idx} "
+                    f"step={step}): {e}"
                 )
+                break
 
-            text = completion.choices[0].text
-            n_tok = completion.usage.completion_tokens if completion.usage else len(text.split())
             total_tokens += n_tok
             num_turns += 1
 
