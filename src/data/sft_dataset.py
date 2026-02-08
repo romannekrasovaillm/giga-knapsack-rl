@@ -10,7 +10,7 @@ using explicit role markers.
 
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
@@ -18,10 +18,11 @@ from torch.utils.data import Dataset
 logger = logging.getLogger(__name__)
 
 # Role markers for base model (no chat template)
+ASSISTANT_MARKER = "<|assistant|>\n"
 ROLE_MARKERS = {
     "system": "<|system|>\n{content}\n",
     "user": "<|user|>\n{content}\n",
-    "assistant": "<|assistant|>\n{content}\n",
+    "assistant": ASSISTANT_MARKER + "{content}\n",
 }
 END_MARKER = "<|end|>"
 
@@ -49,33 +50,77 @@ def format_chat_plain(chat: List[Dict[str, str]]) -> str:
 
 
 def find_assistant_spans(
-    chat: List[Dict[str, str]],
+    text: str,
     tokenizer,
-) -> List[tuple]:
+) -> List[Tuple[int, int]]:
     """
-    Find (start, end) token positions for each assistant turn.
-    Used to create labels mask: only compute loss on assistant tokens.
+    Find (start, end) token positions for assistant CONTENT only.
+
+    Excludes the <|assistant|>\\n marker itself — loss is computed
+    only on what the model should learn to generate.
+
+    Uses offset_mapping for precise char→token alignment, with
+    fallback to string-search based approach.
     """
-    spans = []
-    prefix = ""
-    for msg in chat:
-        role = msg["role"]
-        content = msg["content"]
-        marker = ROLE_MARKERS.get(role, ROLE_MARKERS["user"])
-        formatted = marker.format(content=content)
+    # Find all assistant content regions by character positions
+    char_spans = []
+    search_from = 0
+    while True:
+        marker_pos = text.find(ASSISTANT_MARKER, search_from)
+        if marker_pos == -1:
+            break
+        content_start = marker_pos + len(ASSISTANT_MARKER)
 
-        if role == "assistant":
-            # Tokens before this message = prefix length
-            prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-            start = len(prefix_ids)
-            # Tokens including this message
-            full_ids = tokenizer.encode(prefix + formatted, add_special_tokens=False)
-            end = len(full_ids)
-            spans.append((start, end))
+        # Content ends at the next role marker or END_MARKER
+        content_end = len(text)
+        for next_marker in ["<|system|>\n", "<|user|>\n", "<|assistant|>\n", END_MARKER]:
+            pos = text.find(next_marker, content_start)
+            if pos != -1 and pos < content_end:
+                content_end = pos
 
-        prefix += formatted
+        if content_end > content_start:
+            char_spans.append((content_start, content_end))
+        search_from = content_end
 
-    return spans
+    if not char_spans:
+        return []
+
+    # Try offset_mapping for precise char→token mapping
+    try:
+        encodings = tokenizer(
+            text,
+            return_offsets_mapping=True,
+            add_special_tokens=True,
+            truncation=False,
+        )
+        offset_mapping = encodings["offset_mapping"]
+
+        token_spans = []
+        for char_start, char_end in char_spans:
+            tok_start = None
+            tok_end = None
+            for tok_idx, (cs, ce) in enumerate(offset_mapping):
+                if cs == ce == 0 and tok_idx > 0:
+                    continue  # skip special tokens
+                if tok_start is None and ce > char_start:
+                    tok_start = tok_idx
+                if cs < char_end:
+                    tok_end = tok_idx + 1
+            if tok_start is not None and tok_end is not None:
+                token_spans.append((tok_start, tok_end))
+
+        return token_spans
+
+    except Exception:
+        # Fallback: encode prefix to find token boundaries
+        # Less precise due to BPE merging, but works for all tokenizers
+        token_spans = []
+        for char_start, char_end in char_spans:
+            prefix_ids = tokenizer.encode(text[:char_start], add_special_tokens=True)
+            full_ids = tokenizer.encode(text[:char_end], add_special_tokens=True)
+            token_spans.append((len(prefix_ids), len(full_ids)))
+
+        return token_spans
 
 
 class SFTToolCallingDataset(Dataset):
@@ -84,7 +129,7 @@ class SFTToolCallingDataset(Dataset):
 
     Each sample is a conversation formatted as plain text with role markers.
     Works with base models that have no chat_template.
-    Loss is masked to only compute on assistant turns.
+    Loss is masked to only compute on assistant content tokens.
     """
 
     def __init__(
@@ -105,6 +150,9 @@ class SFTToolCallingDataset(Dataset):
     def _prepare(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         samples = []
         skipped = 0
+        total_loss_tokens = 0
+        total_all_tokens = 0
+
         for record in records:
             messages = record.get("messages", [])
             tools = record.get("tools", [])
@@ -114,10 +162,33 @@ class SFTToolCallingDataset(Dataset):
             result = self._build_sample(messages, tools)
             if result is not None:
                 samples.append(result)
+                total_loss_tokens += result.get("n_loss_tokens", 0)
+                total_all_tokens += result.get("n_total_tokens", 0)
             else:
                 skipped += 1
+
         if skipped:
             logger.info(f"Skipped {skipped} records (no assistant turn or empty)")
+
+        # Diagnostic: how many tokens are used for loss
+        if samples and total_all_tokens > 0:
+            pct = total_loss_tokens / total_all_tokens * 100
+            avg_loss = total_loss_tokens / len(samples)
+            avg_total = total_all_tokens / len(samples)
+            logger.info(
+                f"Loss token stats: {total_loss_tokens:,}/{total_all_tokens:,} "
+                f"({pct:.1f}%) across {len(samples)} samples"
+            )
+            logger.info(
+                f"Per sample avg: {avg_loss:.0f} loss tokens / "
+                f"{avg_total:.0f} total tokens"
+            )
+            print(
+                f"  [SFT Data] Loss tokens: {pct:.1f}% of non-padding tokens "
+                f"(avg {avg_loss:.0f}/{avg_total:.0f} per sample)",
+                flush=True,
+            )
+
         return samples
 
     def _build_sample(
@@ -181,7 +252,19 @@ class SFTToolCallingDataset(Dataset):
         # Format as plain text
         text = format_chat_plain(chat)
 
-        return {"text": text, "chat": chat}
+        # Pre-compute spans and token stats
+        spans = find_assistant_spans(text, self.tokenizer)
+        n_loss_tokens = sum(e - s for s, e in spans) if spans else 0
+        encoded = self.tokenizer.encode(text, add_special_tokens=True, truncation=False)
+        n_total_tokens = min(len(encoded), self.max_length)
+
+        return {
+            "text": text,
+            "chat": chat,
+            "spans": spans,
+            "n_loss_tokens": min(n_loss_tokens, self.max_length),
+            "n_total_tokens": n_total_tokens,
+        }
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -189,7 +272,7 @@ class SFTToolCallingDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sample = self.samples[idx]
         text = sample["text"]
-        chat = sample["chat"]
+        spans = sample["spans"]
 
         # Tokenize
         encodings = self.tokenizer(
@@ -206,8 +289,10 @@ class SFTToolCallingDataset(Dataset):
         # Labels: clone input_ids, mask non-assistant tokens with -100
         labels = input_ids.clone()
 
-        if self.mask_user_turns:
-            labels = self._mask_non_assistant(chat, labels)
+        if self.mask_user_turns and spans:
+            labels = self._apply_spans(spans, labels, attention_mask)
+        elif self.mask_user_turns:
+            labels[:] = -100
 
         # Also mask padding
         labels[attention_mask == 0] = -100
@@ -218,33 +303,21 @@ class SFTToolCallingDataset(Dataset):
             "labels": labels,
         }
 
-    def _mask_non_assistant(
+    def _apply_spans(
         self,
-        chat: List[Dict[str, str]],
+        spans: List[Tuple[int, int]],
         labels: torch.Tensor,
+        attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Mask labels for non-assistant turns (set to -100)."""
+        """Apply pre-computed assistant content spans to labels."""
         seq_len = labels.shape[0]
-
-        # Find assistant spans
-        spans = find_assistant_spans(chat, self.tokenizer)
-
-        if not spans:
-            # No assistant turns found — mask everything
-            labels[:] = -100
-            return labels
 
         # Start with everything masked
         mask = torch.ones(seq_len, dtype=torch.bool)
 
-        # +1 offset for BOS token if tokenizer adds one
-        bos_offset = 0
-        if self.tokenizer.bos_token_id is not None:
-            bos_offset = 1
-
         for start, end in spans:
-            s = min(start + bos_offset, seq_len)
-            e = min(end + bos_offset, seq_len)
+            s = min(start, seq_len)
+            e = min(end, seq_len)
             mask[s:e] = False
 
         labels[mask] = -100
