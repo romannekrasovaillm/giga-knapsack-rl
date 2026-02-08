@@ -379,6 +379,8 @@ class KnapsackGRPOTrainer:
                         max_length=self.max_prompt_length + self.max_response_length,
                         truncation=True,
                     ).to(self.device)
+                    # Remove keys the model doesn't accept
+                    inputs.pop("token_type_ids", None)
 
                     # Generate
                     with torch.no_grad():
