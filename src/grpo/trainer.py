@@ -101,7 +101,7 @@ class KnapsackGRPOTrainer:
         self.clip_ratio_high = config.get("clip_ratio_high", 0.28)
         self.exploration_bias = config.get("exploration_bias", 0.05)
         self.entropy_coef = config.get("entropy_coef", 0.01)
-        self.kl_coef = config.get("kl_coef", 0.001)
+        self.kl_coef = config.get("kl_coef", 0.0)
 
         # Generation config
         self.temperature = config.get("temperature", 1.0)
@@ -151,19 +151,23 @@ class KnapsackGRPOTrainer:
             local_files_only=local_policy,
         ).to(self.device)
 
-        # Reference model (frozen)
-        logger.info(f"Loading reference model from {self.ref_model_path}")
-        local_ref = self._is_local_path(self.ref_model_path)
-        self.ref_model = AutoModelForCausalLM.from_pretrained(
-            self.ref_model_path,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-            attn_implementation=attn_impl,
-            local_files_only=local_ref,
-        ).to(self.device)
-        self.ref_model.eval()
-        for p in self.ref_model.parameters():
-            p.requires_grad = False
+        # Reference model (only if KL is used)
+        self.ref_model = None
+        if self.kl_coef > 0:
+            logger.info(f"Loading reference model from {self.ref_model_path}")
+            local_ref = self._is_local_path(self.ref_model_path)
+            self.ref_model = AutoModelForCausalLM.from_pretrained(
+                self.ref_model_path,
+                torch_dtype=dtype,
+                trust_remote_code=True,
+                attn_implementation=attn_impl,
+                local_files_only=local_ref,
+            ).to(self.device)
+            self.ref_model.eval()
+            for p in self.ref_model.parameters():
+                p.requires_grad = False
+        else:
+            logger.info("KL disabled (kl_coef=0) — skipping reference model")
 
         # vLLM rollout generator
         self.vllm_generator = None
@@ -662,13 +666,15 @@ class KnapsackGRPOTrainer:
                 new_lp = F.log_softmax(sl, dim=-1)
                 new_tlp = new_lp.gather(2, labels.unsqueeze(-1)).squeeze(-1)
 
-                with torch.no_grad():
-                    ref_out = self.ref_model(input_ids=mb_ids, attention_mask=attn)
-                    ref_sl = ref_out.logits[:, :-1, :]
-                    ref_lp = F.log_softmax(ref_sl, dim=-1)
-                    ref_tlp = ref_lp.gather(
-                        2, labels.unsqueeze(-1)
-                    ).squeeze(-1)
+                ref_tlp = None
+                if self.ref_model is not None:
+                    with torch.no_grad():
+                        ref_out = self.ref_model(input_ids=mb_ids, attention_mask=attn)
+                        ref_sl = ref_out.logits[:, :-1, :]
+                        ref_lp = F.log_softmax(ref_sl, dim=-1)
+                        ref_tlp = ref_lp.gather(
+                            2, labels.unsqueeze(-1)
+                        ).squeeze(-1)
 
                 loss, metrics = knapsack_grpo_loss(
                     log_probs=new_tlp, old_log_probs=mb_old_lp,

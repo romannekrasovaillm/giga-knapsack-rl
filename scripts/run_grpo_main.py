@@ -45,7 +45,7 @@ def main():
     parser.add_argument("--clip-ratio-high", type=float, default=0.28)
     parser.add_argument("--exploration-bias", type=float, default=0.05)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
-    parser.add_argument("--kl-coef", type=float, default=0.001)
+    parser.add_argument("--kl-coef", type=float, default=0.0)
 
     # Generation
     parser.add_argument("--temperature", type=float, default=1.0)
