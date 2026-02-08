@@ -1,0 +1,34 @@
+# SFT Warmup Configuration
+# Fine-tune on tool_calling subset for 1-2 epochs
+
+# Inherits from base.yaml
+defaults:
+  - base
+
+sft:
+  # Model
+  model_name: "ai-sage/GigaChat3-10B-A1.8B-base"
+  max_length: 4096
+
+  # Training
+  num_epochs: 2
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+
+  # Data
+  data_cache_dir: "./data/raw"
+  max_samples: null    # null = use all 316k samples; set to e.g. 50000 for quick test
+
+  # Checkpointing
+  output_dir: "./checkpoints/sft"
+  save_steps: 500
+  log_steps: 10
+  gradient_checkpointing: true
+
+  # Hardware
+  device: "cuda"
+  num_workers: 4

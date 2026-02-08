@@ -1,0 +1,19 @@
+# Base configuration shared across SFT and GRPO
+model:
+  name: "ai-sage/GigaChat3-10B-A1.8B-base"
+  dtype: "bfloat16"
+  trust_remote_code: true
+  attn_implementation: "flash_attention_2"
+
+data:
+  dataset_repo: "nvidia/Nemotron-Agentic-v1"
+  cache_dir: "./data/raw"
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+logging:
+  log_dir: "./logs"
+  use_wandb: false
+  wandb_project: "giga-knapsack-rl"
+  use_tensorboard: false
+  terminal_width: 100

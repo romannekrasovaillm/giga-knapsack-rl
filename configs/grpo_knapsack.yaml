@@ -1,0 +1,85 @@
+# Knapsack-GRPO Configuration
+# GRPO training with adaptive rollout budget allocation
+
+# Inherits from base.yaml
+defaults:
+  - base
+
+grpo:
+  # Model (post-SFT checkpoint)
+  model_path: "./checkpoints/sft/final"
+  ref_model_path: "./checkpoints/sft/final"
+  max_prompt_length: 2048
+  max_response_length: 2048
+
+  # Knapsack RL budget allocation
+  knapsack:
+    N_total: 1024           # Total rollout budget per batch
+    N_low: 2                # Minimum rollouts per prompt
+    N_up: 128               # Maximum rollouts per prompt
+    warmup_iterations: 5    # Uniform allocation during warmup
+
+  # GRPO training
+  num_iterations: 1000
+  batch_size: 16            # Number of prompts per batch
+  mini_batch_size: 4        # Mini-batch for policy updates
+  ppo_epochs: 1             # PPO epochs per iteration
+  learning_rate: 1.0e-6
+  max_grad_norm: 1.0
+  adv_clip: 5.0             # Advantage clipping (from paper)
+
+  # DAPO-style importance sampling (asymmetric)
+  dapo:
+    clip_ratio: 0.2          # Standard lower clip
+    clip_ratio_high: 0.28    # Wider upper clip for exploration (asymmetric!)
+    exploration_bias: 0.05   # Additive exploration bonus
+    entropy_coef: 0.01       # Entropy regularization
+    kl_coef: 0.001           # KL penalty against reference
+
+  # Generation
+  generation:
+    temperature: 1.0
+    top_p: 0.95
+    max_env_steps: 8         # Max tool-calling turns
+
+  # Data
+  data_cache_dir: "./data/raw"
+  max_samples: null          # null = use all 19k interactive_agent samples
+
+  # Checkpointing
+  output_dir: "./checkpoints/grpo"
+  save_every: 50
+
+  # Hardware
+  device: "cuda"
+
+# verl integration config (for distributed training)
+verl:
+  enabled: false             # Set true to use verl distributed backend
+  trainer:
+    total_epochs: 1
+    n_gpus_per_node: 8
+    nnodes: 1
+  actor_rollout_ref:
+    model:
+      path: "./checkpoints/sft/final"
+    actor:
+      use_kl_loss: true
+      kl_loss_coef: 0.001
+      kl_loss_type: "low_var_kl"
+      clip_ratio: 0.2
+      loss_agg_mode: "token-mean"    # DrGRPO style
+    rollout:
+      name: "vllm"
+      temperature: 1.0
+      top_p: 0.95
+      tensor_model_parallel_size: 2
+      gpu_memory_utilization: 0.5
+      max_num_batched_tokens: 8192
+  algorithm:
+    adv_estimator: "knapsack_grpo"    # Custom advantage estimator
+    gamma: 1.0
+    lam: 1.0
+    use_kl_in_reward: false
+  data:
+    train_batch_size: 128
