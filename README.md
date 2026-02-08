@@ -6,7 +6,7 @@ Based on the paper: *"Knapsack RL: Unlocking Exploration of LLMs via Optimizing 
 
 ## Overview
 
-Instead of uniform N rollouts per prompt, Knapsack RL allocates budget adaptively via dynamic programming — giving more rollouts to prompts in the "golden zone" (p ≈ 0.2–0.5) and fewer to trivial/impossible ones.
+Instead of uniform N rollouts per prompt, Knapsack RL allocates budget adaptively via dynamic programming — giving more rollouts to prompts in the "golden zone" (p ~ 0.2-0.5) and fewer to trivial/impossible ones.
 
 **Pipeline:**
 1. **SFT Warmup** — 2 epochs on `tool_calling` subset (316k samples) to teach `<tool_call>` format
@@ -22,28 +22,54 @@ Instead of uniform N rollouts per prompt, Knapsack RL allocates budget adaptivel
 ## Project Structure
 
 ```
+giga-knapsack-rl/
 ├── configs/
 │   ├── base.yaml                # Shared config
 │   ├── sft_warmup.yaml          # SFT hyperparams
-│   └── grpo_knapsack.yaml       # GRPO + Knapsack RL + DAPO + verl config
+│   └── grpo_knapsack.yaml       # GRPO + Knapsack RL + DAPO config
 ├── src/
 │   ├── data/                    # Dataset loading & parsing (Nemotron Agentic v1)
+│   │   ├── loader.py            #   HuggingFace download + caching
+│   │   ├── parser.py            #   JSONL → AgenticTrajectory
+│   │   ├── sft_dataset.py       #   SFT dataset with role markers (no chat template)
+│   │   └── rlvr_dataset.py      #   RLVR dataset with prompt/GT/tool_env/difficulty
 │   ├── environment/             # Simulated tool environment
-│   ├── rewards/                 # Hard verifier + reward manager
-│   ├── knapsack/                # DP solver + value functions + budget allocator
-│   ├── grpo/                    # Advantage, DAPO sampling, policy loss, trainer
-│   ├── metrics/                 # Tracker + logger (terminal, JSONL, wandb)
-│   ├── sft/                     # SFT warmup trainer
-│   └── utils.py                 # Auto-detect attention backend & dtype
+│   │   ├── tool_env.py          #   Replays GT tool responses, parses <tool_call> tags
+│   │   └── tool_registry.py     #   Tool definitions, parameter validation
+│   ├── rewards/                 # Reward computation
+│   │   ├── verifier.py          #   5-stage hard verifier (exact/key/ngram/toolcall/combined)
+│   │   └── reward_manager.py    #   Wraps verifier, token-level reward placement
+│   ├── knapsack/                # Knapsack RL core
+│   │   ├── dp_solver.py         #   Numba @njit DP solver
+│   │   ├── task_value.py        #   P(nonzero_gradient) × InfoGain value function
+│   │   └── allocator.py         #   Stateful allocator tracking per-prompt success rates
+│   ├── grpo/                    # GRPO training
+│   │   ├── advantage.py         #   Variable group sizes, adv clipping [-5,5], exploration bonus
+│   │   ├── dapo_sampling.py     #   Asymmetric importance weights, dynamic temperature
+│   │   ├── policy_loss.py       #   PPO-clip + KL + entropy with asymmetric clipping
+│   │   ├── trainer.py           #   Full training loop (allocate→generate→verify→update→log)
+│   │   └── verl_integration.py  #   Registers knapsack_grpo with verl framework
+│   ├── metrics/                 # Logging & tracking
+│   │   ├── tracker.py           #   BLEU, entropy, tokens, time, EGR per rollout/group/batch
+│   │   └── logger.py            #   Terminal output + JSONL files + wandb/tensorboard
+│   ├── sft/
+│   │   └── trainer.py           #   SFT warmup trainer with gradient checkpointing
+│   └── utils.py                 # Auto-detect attention backend & torch dtype
 ├── scripts/
 │   ├── setup_and_run.sh         # One-command install + full pipeline
 │   ├── download_data.py         # Download Nemotron dataset
 │   ├── prepare_data.py          # Parse & report statistics
-│   ├── run_sft.sh / run_sft_main.py
-│   ├── run_grpo.sh / run_grpo_main.py
-│   ├── run_grpo_verl.py         # verl distributed backend
+│   ├── run_sft.sh               # SFT launch script (torchrun)
+│   ├── run_sft_main.py          # SFT entry point
+│   ├── run_grpo.sh              # GRPO launch script (torchrun)
+│   ├── run_grpo_main.py         # GRPO entry point (standalone)
+│   ├── run_grpo_verl.py         # GRPO entry point (verl distributed)
 │   └── run_all.sh               # Full pipeline end-to-end
-├── tests/                       # 40 tests (knapsack, verifier, data, grpo)
+├── tests/                       # 40 tests covering all modules
+│   ├── test_knapsack.py         # DP solver, value functions, allocator
+│   ├── test_verifier.py         # Hard verifier, reward manager
+│   ├── test_data.py             # Parsing, dataset construction
+│   └── test_grpo.py             # Advantage, DAPO loss, policy loss
 ├── conftest.py                  # sys.path setup for tests
 ├── setup.py
 └── requirements.txt
@@ -68,7 +94,7 @@ pip install torch --index-url https://download.pytorch.org/whl/cu124
 # Build deps (needed before flash-attn)
 pip install numpy psutil ninja packaging setuptools wheel
 
-# Flash Attention (optional, auto-fallback to SDPA if missing)
+# Flash Attention (optional — auto-fallback to SDPA if missing)
 python -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)"
 # If True:
 pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.5cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
@@ -96,10 +122,10 @@ pytest tests/ -v
 ### Run Full Pipeline
 
 ```bash
-# Download data
+# 1. Download data
 python scripts/download_data.py --cache-dir ./data/raw --split all
 
-# SFT warmup (2 epochs on tool_calling)
+# 2. SFT warmup (2 epochs on tool_calling)
 python scripts/run_sft_main.py \
   --model-name ai-sage/GigaChat3-10B-A1.8B-base \
   --output-dir ./checkpoints/sft \
@@ -107,7 +133,7 @@ python scripts/run_sft_main.py \
   --num-epochs 2 --batch-size 4 --gradient-accumulation-steps 8 \
   --learning-rate 2e-5 --max-length 4096
 
-# GRPO + Knapsack RL (interactive_agent)
+# 3. GRPO + Knapsack RL (interactive_agent)
 python scripts/run_grpo_main.py \
   --model-path ./checkpoints/sft/final \
   --output-dir ./checkpoints/grpo \
@@ -140,16 +166,99 @@ python scripts/run_grpo_main.py \
   --n-total 32 --n-low 2 --n-up 16 --max-samples 200
 ```
 
+## Logging & Monitoring
+
+### Terminal output
+
+SFT prints progress every `--log-steps` (default 10) optimizer steps:
+```
+  [SFT] step=    10 | loss=2.8314 | lr=1.23e-06 | epoch=1
+  [SFT] step=    20 | loss=2.7921 | lr=2.46e-06 | epoch=1
+  [Epoch 1] 100/79125 (0.1%) | loss=2.6543 | 42s elapsed
+```
+
+GRPO prints a full metrics table every iteration:
+```
+====================================================================================================
+[GRPO] Iteration 1
+====================================================================================================
+  Prompts in batch                  16
+  Total rollouts                    128
+  Mean group size                   8.0
+  ──────────────────────────────────────────────────────────────────────────────────────────────────
+  Batch mean reward                 0.1250
+  Batch success rate                12.50%
+  Effective gradient ratio          68.75%
+  ...
+```
+
+### Log files
+
+| File | Content |
+|---|---|
+| `./logs/sft_warmup_<ts>.jsonl` | SFT step-by-step metrics (loss, lr, epoch) |
+| `./logs/sft_warmup_<ts>.log` | Full Python logging output |
+| `./logs/knapsack_grpo_<ts>.jsonl` | GRPO iteration metrics (rewards, BLEU, advantages, etc.) |
+| `./logs/knapsack_grpo_<ts>_metrics.jsonl` | Knapsack allocation details per iteration |
+
+### Optional integrations
+
+```bash
+# Weights & Biases
+python scripts/run_grpo_main.py --use-wandb ...
+
+# TensorBoard (enable in config)
+tensorboard --logdir ./logs/tensorboard/
+```
+
+## Important Notes
+
+### Base model — no chat template
+
+GigaChat3-10B-A1.8B-base is a post-pretrain model **without a chat template**. SFT uses explicit role markers instead of `tokenizer.apply_chat_template()`:
+
+```
+<|system|>
+You are a helpful assistant with access to tools.
+<|user|>
+What's the weather in Moscow?
+<|assistant|>
+<tool_call>{"name": "get_weather", "arguments": {"city": "Moscow"}}</tool_call>
+<|end|>
+```
+
+### Gradient checkpointing & KV cache
+
+During SFT/GRPO training, gradient checkpointing is enabled to save ~40% GPU memory. This automatically disables KV cache (`use_cache=False`) — this is correct behavior:
+
+| Phase | KV cache | Gradient checkpointing | Why |
+|---|---|---|---|
+| SFT training | OFF | ON | Saves memory, KV cache not needed for training |
+| GRPO generation | ON | OFF | `model.generate()` in eval mode uses KV cache |
+| GRPO backward | OFF | ON | Same as SFT |
+| Inference | ON | OFF | Full KV cache for fast generation |
+
+### Attention backend auto-detection
+
+`src/utils.py` automatically selects the best attention implementation:
+1. `flash_attention_2` — if flash-attn installed
+2. `sdpa` — PyTorch native scaled dot-product attention (default fallback)
+3. `eager` — manual attention (slowest, always works)
+
 ## Knapsack RL Algorithm
 
 For each prompt with success rate `p`, the value of allocating `N` rollouts is:
 
 ```
-Value(N, p) = P(nonzero_gradient | N, p) × InfoGain(p)
-            = [1 - p^N - (1-p)^N]       × [p × (1-p)^2]
+Value(N, p) = P(nonzero_gradient | N, p) * InfoGain(p)
+            = [1 - p^N - (1-p)^N]         * [p * (1-p)^2]
 ```
 
-The DP solver maximizes total value subject to `Σ N_i ≤ N_total`, where each prompt gets `N_i ∈ [N_low, N_up]`.
+The DP solver maximizes total value subject to `sum(N_i) <= N_total`, where each prompt gets `N_i in [N_low, N_up]`.
+
+**Warmup phase** (first 5 iterations): uniform allocation `N_i = N_total / batch_size` to estimate initial success rates.
+
+**Steady state**: the allocator tracks per-prompt success rates and reallocates budget every iteration via the knapsack DP.
 
 ## Dataset
 
@@ -166,8 +275,6 @@ Per rollout, per group, per batch:
 - Token counts, generation time
 - Advantages (mean, std, min, max)
 - Knapsack allocation (budget used, utilization, distribution)
-
-Output: terminal tables + `./logs/*.jsonl` + optional wandb/tensorboard.
 
 ## Model
 
