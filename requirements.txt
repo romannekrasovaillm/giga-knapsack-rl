@@ -47,10 +47,13 @@ pytest>=7.0.0
 # ОПЦИОНАЛЬНЫЕ (для distributed / GPU ускорения)
 # ================================================
 
-# Flash Attention 2 (GPU only, CUDA required)
-# pip install flash-attn --no-build-isolation
-# Или готовый wheel:
-# pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu124torch2.5-cp311-cp311-linux_x86_64.whl
+# Flash Attention 2 (GPU only, CUDA 12.x required)
+# Готовый wheel (рекомендуется, ставится за секунды):
+#   python -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)"  # узнать ABI
+#   ABI=TRUE:  pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.5cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
+#   ABI=FALSE: pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
+# Из исходников (10-20 мин, нужен nvcc):
+#   pip install flash-attn --no-build-isolation
 
 # verl distributed GRPO framework (optional)
 # pip install verl>=0.3.0 vllm>=0.8.2 "ray[default]>=2.35.0"

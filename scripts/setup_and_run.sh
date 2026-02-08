@@ -54,34 +54,49 @@ if $PYTHON -c "import flash_attn" 2>/dev/null; then
     echo "  -> flash-attn уже установлен"
 else
     echo "  -> Устанавливаю flash-attn..."
-    # Попытка 1: готовый wheel (быстро, без компиляции)
-    FLASH_WHEEL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+${CUDA_VERSION}torch${TORCH_VERSION%.*}-${PY_VERSION}-${PY_VERSION}-linux_x86_64.whl"
-    echo "  -> Пробую готовый wheel: $FLASH_WHEEL"
+    # Определяем CXX11 ABI
+    CXX_ABI=$($PYTHON -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CXX11_ABI else 'FALSE')" 2>/dev/null || echo "TRUE")
+    # Определяем минорную версию torch (2.5 -> 2.5, 2.4 -> 2.4)
+    TORCH_MINOR=$($PYTHON -c "import torch; v=torch.__version__.split('+')[0].split('.')[:2]; print('.'.join(v))" 2>/dev/null || echo "2.5")
+
+    # Попытка 1: готовый wheel с GitHub releases (cu12, не cu124!)
+    # URL-encoded '+' = %2B
+    FLASH_WHEEL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch${TORCH_MINOR}cxx11abi${CXX_ABI}-${PY_VERSION}-${PY_VERSION}-linux_x86_64.whl"
+    echo "  -> Пробую wheel: torch=${TORCH_MINOR}, ABI=${CXX_ABI}, Python=${PY_VERSION}"
     if pip install "$FLASH_WHEEL" 2>/dev/null; then
         echo "  -> flash-attn установлен из wheel"
     else
-        echo "  -> Wheel не найден, собираю из исходников..."
-        echo "     (это займёт 10-20 минут, нужен nvcc)"
-        # psutil и numpy уже установлены выше
-        MAX_JOBS=4 pip install flash-attn --no-build-isolation --quiet
+        echo "  -> Wheel не подошёл, пробую альтернативный ABI..."
+        ALT_ABI="FALSE"
+        [ "$CXX_ABI" = "FALSE" ] && ALT_ABI="TRUE"
+        FLASH_WHEEL_ALT="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3%2Bcu12torch${TORCH_MINOR}cxx11abi${ALT_ABI}-${PY_VERSION}-${PY_VERSION}-linux_x86_64.whl"
+        if pip install "$FLASH_WHEEL_ALT" 2>/dev/null; then
+            echo "  -> flash-attn установлен (ABI=${ALT_ABI})"
+        else
+            echo "  -> Готовые wheels недоступны, собираю из исходников..."
+            echo "     (это займёт 10-20 минут, нужен nvcc)"
+            MAX_JOBS=4 pip install flash-attn --no-build-isolation --quiet || \
+                echo "  -> ПРЕДУПРЕЖДЕНИЕ: flash-attn не установлен, используется SDPA fallback"
+        fi
     fi
 fi
 
 # 1d. Основные зависимости проекта
 echo "  -> Основные зависимости проекта..."
-pip install transformers>=4.45.0 datasets>=2.20.0 huggingface-hub>=0.24.0 \
-    tokenizers>=0.19.0 accelerate>=0.33.0 peft>=0.12.0 \
-    numba>=0.59.0 tqdm>=4.66.0 pyyaml>=6.0.0 \
-    jsonlines>=4.0.0 --quiet
+pip install "transformers>=4.45.0" "datasets>=2.20.0" "huggingface-hub>=0.24.0" \
+    "tokenizers>=0.19.0" "accelerate>=0.33.0" "peft>=0.12.0" \
+    "numba>=0.59.0" "tqdm>=4.66.0" "pyyaml>=6.0.0" \
+    "antlr4-python3-runtime==4.9.3" "hydra-core>=1.3.0" "omegaconf>=2.3.0" \
+    "jsonlines>=4.0.0" "pyarrow>=15.0.0" --quiet
 
 # 1e. Метрики и логирование
 echo "  -> Метрики (nltk, wandb, tensorboard)..."
-pip install nltk>=3.8.0 sacrebleu>=2.4.0 wandb>=0.17.0 tensorboard>=2.17.0 --quiet
+pip install "nltk>=3.8.0" "sacrebleu>=2.4.0" "wandb>=0.17.0" "tensorboard>=2.17.0" --quiet
 $PYTHON -c "import nltk; nltk.download('punkt_tab', quiet=True)" 2>/dev/null || true
 
 # 1f. verl + vllm (опционально, для distributed)
 echo "  -> verl + vllm (опционально)..."
-pip install verl>=0.3.0 vllm>=0.8.2 ray[default]>=2.35.0 2>/dev/null \
+pip install "verl>=0.3.0" "vllm>=0.8.2" "ray[default]>=2.35.0" 2>/dev/null \
     && echo "  -> verl установлен" \
     || echo "  -> verl/vllm не установились (не критично, standalone режим работает)"
 
