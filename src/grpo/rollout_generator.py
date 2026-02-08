@@ -1,20 +1,20 @@
 """
-Rollout generation backends: vLLM server (batched) or HuggingFace fallback.
+Rollout generation via vLLM server (OpenAI-compatible API).
 
-vLLM server mode generates rollouts via OpenAI-compatible API, enabling
-batched inference with PagedAttention for much faster throughput.
+Fully async: each rollout runs independently through multi-turn generation.
+Fast rollouts don't wait for slow ones. Uses asyncio + aiohttp for concurrency.
 """
 
+import asyncio
 import json
 import logging
 import time
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any
 
 from src.environment.tool_env import SimulatedToolEnvironment
 
 logger = logging.getLogger(__name__)
 
-# Terminal colors
 CYAN = "\033[96m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -25,7 +25,6 @@ RESET = "\033[0m"
 
 
 def _truncate(text: str, head: int = 80, tail: int = 60) -> str:
-    """Truncate text showing head and tail."""
     text = text.replace("\n", "\\n")
     if len(text) <= head + tail + 10:
         return text
@@ -34,10 +33,11 @@ def _truncate(text: str, head: int = 80, tail: int = 60) -> str:
 
 class VLLMRolloutGenerator:
     """
-    Generate rollouts using a vLLM server (OpenAI-compatible API).
+    Async rollout generation via vLLM server.
 
-    Supports batched multi-turn generation: all rollouts for the same turn
-    are batched together for maximum throughput.
+    Each rollout runs its multi-turn loop independently — fast rollouts
+    complete without waiting for slow ones. Concurrency is controlled
+    by a semaphore to avoid overwhelming the server.
     """
 
     def __init__(
@@ -46,21 +46,18 @@ class VLLMRolloutGenerator:
         model_name: str = "ai-sage/GigaChat3-10B-A1.8B-base",
         max_response_length: int = 2048,
         max_env_steps: int = 8,
-        batch_chunk_size: int = 128,
+        max_concurrent: int = 64,
     ):
-        try:
-            import openai
-        except ImportError:
-            raise ImportError("pip install openai  — required for vLLM server mode")
-
+        import openai
         self.client = openai.OpenAI(base_url=server_url, api_key="not-needed")
+        self.async_client = openai.AsyncOpenAI(base_url=server_url, api_key="not-needed")
         self.model_name = model_name
         self.max_response_length = max_response_length
         self.max_env_steps = max_env_steps
-        self.batch_chunk_size = batch_chunk_size
+        self.max_concurrent = max_concurrent
         self.server_url = server_url
 
-        # Verify connection
+        # Verify connection & auto-detect model
         try:
             models = self.client.models.list()
             available = [m.id for m in models.data]
@@ -81,170 +78,149 @@ class VLLMRolloutGenerator:
         temperature: float = 1.0,
         top_p: float = 0.95,
     ) -> Dict[str, Any]:
-        """
-        Generate all rollouts for a batch with batched multi-turn generation.
+        """Generate all rollouts async. Blocks until all are done."""
+        return asyncio.run(self._generate_all(
+            prompt_texts, tools_jsons, tool_env_logs,
+            budgets, temperature, top_p,
+        ))
 
-        Returns dict with:
-            responses: List[str] — flat list of full response texts
-            token_counts: List[int]
-            gen_times: List[float]
-            num_turns: List[int]
-            prompt_indices: List[int] — which prompt each rollout belongs to
-        """
+    async def _generate_all(
+        self,
+        prompt_texts, tools_jsons, tool_env_logs,
+        budgets, temperature, top_p,
+    ) -> Dict[str, Any]:
         t_total = time.time()
         n_prompts = len(prompt_texts)
         n_rollouts = int(sum(budgets))
+        sem = asyncio.Semaphore(self.max_concurrent)
 
-        # Expand everything to per-rollout level
-        expanded = []
+        # Progress counter
+        progress = {"done": 0, "total": n_rollouts, "successes": 0}
+
+        print(
+            f"  {CYAN}[vLLM async]{RESET} Generating {n_rollouts} rollouts "
+            f"for {n_prompts} prompts (max_concurrent={self.max_concurrent})",
+            flush=True,
+        )
+
+        # Build tasks
+        tasks = []
         for i, (prompt, tools_json, env_log_str) in enumerate(
             zip(prompt_texts, tools_jsons, tool_env_logs)
         ):
             N_i = int(budgets[i])
             tools = json.loads(tools_json) if isinstance(tools_json, str) else tools_json
             env_log = json.loads(env_log_str) if isinstance(env_log_str, str) else env_log_str
+
             for j in range(N_i):
-                expanded.append({
-                    "prompt_idx": i,
-                    "rollout_idx": j,
-                    "prompt": prompt,
-                    "tools": tools,
-                    "env_log": env_log,
-                    "conversation": prompt,
-                    "response": "",
-                    "total_tokens": 0,
-                    "num_turns": 0,
-                    "done": False,
-                    "env": SimulatedToolEnvironment(
-                        tools=tools, tool_env_log=env_log,
-                        max_steps=self.max_env_steps,
-                    ),
-                    "state": None,
-                    "gen_time": 0.0,
-                })
-                expanded[-1]["state"] = expanded[-1]["env"].reset()
+                tasks.append(self._run_single_rollout(
+                    prompt_idx=i, rollout_idx=j,
+                    prompt=prompt, tools=tools, env_log=env_log,
+                    temperature=temperature, top_p=top_p,
+                    sem=sem, progress=progress,
+                ))
 
-        print(
-            f"  {CYAN}[vLLM]{RESET} Generating {n_rollouts} rollouts "
-            f"for {n_prompts} prompts (budget={int(sum(budgets))})",
-            flush=True,
-        )
-
-        # Multi-turn batched generation
-        for turn in range(self.max_env_steps):
-            active = [r for r in expanded if not r["done"]]
-            if not active:
-                break
-
-            # Batch generate for all active rollouts
-            prompts_batch = [r["conversation"] for r in active]
-            max_new = min(512, self.max_response_length)
-
-            t_turn = time.time()
-            completions = self._batch_generate(
-                prompts_batch, max_new, temperature, top_p,
-            )
-            turn_time = time.time() - t_turn
-
-            # Process results
-            n_tool_calls = 0
-            n_final = 0
-            turn_tokens = 0
-
-            for r, text in zip(active, completions):
-                r["num_turns"] += 1
-                r["total_tokens"] += len(text.split())  # approx
-                r["gen_time"] += turn_time / len(active)
-
-                state, tool_response = r["env"].step(r["state"], text)
-                r["state"] = state
-                r["response"] += text
-
-                if state.done:
-                    r["done"] = True
-                    n_final += 1
-                else:
-                    n_tool_calls += 1
-                    r["conversation"] += "\n" + text + "\n" + tool_response
-                    r["response"] += "\n" + tool_response + "\n"
-
-            turn_tokens = sum(len(c.split()) for c in completions)
-            still_active = sum(1 for r in expanded if not r["done"])
-
-            print(
-                f"    turn {turn+1}: {len(active)} active | "
-                f"{n_tool_calls} tool_calls, {n_final} final | "
-                f"{turn_tokens:,} tokens | {turn_time:.1f}s | "
-                f"{still_active} remaining",
-                flush=True,
-            )
-
-        # Mark any remaining as done
-        for r in expanded:
-            if not r["done"]:
-                r["done"] = True
+        results = await asyncio.gather(*tasks)
 
         total_time = time.time() - t_total
+        total_tokens = sum(r["total_tokens"] for r in results)
 
-        # Log per-group summary
-        self._log_group_summaries(expanded, budgets, prompt_texts)
+        # Per-group summary
+        self._log_group_summaries(results, budgets, prompt_texts)
 
         print(
-            f"  {CYAN}[vLLM]{RESET} Done: {n_rollouts} rollouts in {total_time:.1f}s "
-            f"({total_time/n_rollouts:.2f}s/rollout)",
+            f"  {CYAN}[vLLM async]{RESET} Done: {n_rollouts} rollouts in "
+            f"{total_time:.1f}s ({total_time/n_rollouts:.2f}s/rollout) | "
+            f"{total_tokens:,} tokens",
             flush=True,
         )
 
         return {
-            "responses": [r["response"] for r in expanded],
-            "token_counts": [r["total_tokens"] for r in expanded],
-            "gen_times": [r["gen_time"] for r in expanded],
-            "num_turns": [r["num_turns"] for r in expanded],
-            "prompt_indices": [r["prompt_idx"] for r in expanded],
+            "responses": [r["response"] for r in results],
+            "token_counts": [r["total_tokens"] for r in results],
+            "gen_times": [r["gen_time"] for r in results],
+            "num_turns": [r["num_turns"] for r in results],
+            "prompt_indices": [r["prompt_idx"] for r in results],
         }
 
-    def _batch_generate(
-        self,
-        prompts: List[str],
-        max_tokens: int,
-        temperature: float,
-        top_p: float,
-    ) -> List[str]:
-        """Batch generate completions via vLLM server."""
-        results = []
-        chunk_size = self.batch_chunk_size
+    async def _run_single_rollout(
+        self, prompt_idx, rollout_idx, prompt, tools, env_log,
+        temperature, top_p, sem, progress,
+    ) -> Dict[str, Any]:
+        """Run one multi-turn rollout independently."""
+        env = SimulatedToolEnvironment(
+            tools=tools, tool_env_log=env_log,
+            max_steps=self.max_env_steps,
+        )
+        state = env.reset()
+        conversation = prompt
+        response = ""
+        total_tokens = 0
+        num_turns = 0
+        t0 = time.time()
 
-        for start in range(0, len(prompts), chunk_size):
-            chunk = prompts[start:start + chunk_size]
-            try:
-                response = self.client.completions.create(
+        for step in range(self.max_env_steps):
+            max_new = min(512, self.max_response_length - total_tokens)
+            if max_new <= 0:
+                break
+
+            async with sem:
+                completion = await self.async_client.completions.create(
                     model=self.model_name,
-                    prompt=chunk,
-                    max_tokens=max_tokens,
+                    prompt=conversation,
+                    max_tokens=max_new,
                     temperature=temperature,
                     top_p=top_p,
                 )
-                # Sort by index to maintain order
-                sorted_choices = sorted(response.choices, key=lambda c: c.index)
-                results.extend([c.text for c in sorted_choices])
-            except Exception as e:
-                logger.error(f"vLLM batch generation failed: {e}")
-                # Return empty strings as fallback
-                results.extend(["" for _ in chunk])
 
-        return results
+            text = completion.choices[0].text
+            n_tok = completion.usage.completion_tokens if completion.usage else len(text.split())
+            total_tokens += n_tok
+            num_turns += 1
+
+            state, tool_response = env.step(state, text)
+            response += text
+
+            if state.done:
+                break
+
+            conversation += "\n" + text + "\n" + tool_response
+            response += "\n" + tool_response + "\n"
+
+        gen_time = time.time() - t0
+
+        # Progress update
+        progress["done"] += 1
+        done = progress["done"]
+        total = progress["total"]
+        if done % max(1, total // 20) == 0 or done == total:
+            elapsed = time.time() - t0
+            print(
+                f"    {done}/{total} rollouts done "
+                f"({done/total:.0%}) | this: turns={num_turns} "
+                f"tok={total_tokens} {gen_time:.1f}s",
+                flush=True,
+            )
+
+        return {
+            "prompt_idx": prompt_idx,
+            "rollout_idx": rollout_idx,
+            "response": response,
+            "total_tokens": total_tokens,
+            "num_turns": num_turns,
+            "gen_time": gen_time,
+        }
 
     def _log_group_summaries(
         self,
-        expanded: List[Dict],
+        results: List[Dict],
         budgets,
         prompt_texts: List[str],
     ):
-        """Log per-group rollout summaries."""
         offset = 0
         for i, N_i in enumerate(budgets):
             N_i = int(N_i)
-            group = expanded[offset:offset + N_i]
+            group = results[offset:offset + N_i]
             offset += N_i
 
             token_counts = [r["total_tokens"] for r in group]
@@ -253,14 +229,12 @@ class VLLMRolloutGenerator:
             avg_turns = sum(turns) / len(turns) if turns else 0
 
             prompt_preview = _truncate(prompt_texts[i], head=60, tail=0)
-
-            # Show first and last rollout
             first = _truncate(group[0]["response"], head=80, tail=40)
             last = _truncate(group[-1]["response"], head=80, tail=40) if len(group) > 1 else ""
 
             print(
                 f"    {DIM}[Group {i+1}/{len(budgets)}] N_i={N_i} | "
-                f"avg_tokens={avg_tokens:.0f} | avg_turns={avg_turns:.1f}{RESET}",
+                f"avg_tok={avg_tokens:.0f} | avg_turns={avg_turns:.1f}{RESET}",
                 flush=True,
             )
             print(f"      {DIM}prompt: {prompt_preview}{RESET}", flush=True)
