@@ -227,7 +227,7 @@ class TrainingLogger:
                     f"{adv:>10}{reset}"
                 )
 
-        print(f"{'=' * w}\n")
+        print(f"{'=' * w}\n", flush=True)
 
     def log_sft_step(self, step: int, loss: float, lr: float, extra: Optional[Dict] = None):
         """Log an SFT training step."""
@@ -244,8 +244,13 @@ class TrainingLogger:
         with open(self.log_file, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
-        if step % 50 == 0:
-            print(f"  [SFT] step={step:>6d} | loss={loss:.4f} | lr={lr:.2e}")
+        epoch_info = ""
+        if extra and "epoch" in extra:
+            epoch_info = f" | epoch={extra['epoch']+1}"
+        print(
+            f"  [SFT] step={step:>6d} | loss={loss:.4f} | lr={lr:.2e}{epoch_info}",
+            flush=True,
+        )
 
         if self.wandb_run:
             try:
@@ -270,7 +275,7 @@ class TrainingLogger:
         parts = [f"[LOSS] iter={iteration}"]
         for k, v in loss_metrics.items():
             parts.append(f"{k}={v:.4f}")
-        print(f"  {' | '.join(parts)}")
+        print(f"  {' | '.join(parts)}", flush=True)
 
         if self.wandb_run:
             try:

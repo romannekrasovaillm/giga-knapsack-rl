@@ -150,6 +150,10 @@ class SFTWarmupTrainer:
         self.model.train()
         best_loss = float("inf")
 
+        total_batches = len(self.dataloader)
+        logger.info(f"Batches per epoch: {total_batches}")
+        print(flush=True)
+
         for epoch in range(self.num_epochs):
             epoch_loss = 0.0
             epoch_steps = 0
@@ -192,6 +196,17 @@ class SFTWarmupTrainer:
                     # Save checkpoint
                     if self.global_step % self.save_steps == 0:
                         self._save_checkpoint(f"step_{self.global_step}")
+
+                # Progress indicator every 100 batches
+                elif (batch_idx + 1) % 100 == 0:
+                    pct = (batch_idx + 1) / total_batches * 100
+                    elapsed = time.time() - t0
+                    print(
+                        f"  [Epoch {epoch+1}] {batch_idx+1}/{total_batches} "
+                        f"({pct:.1f}%) | loss={outputs.loss.item():.4f} | "
+                        f"{elapsed:.0f}s elapsed",
+                        flush=True,
+                    )
 
             # End of epoch
             avg_epoch_loss = epoch_loss / epoch_steps
