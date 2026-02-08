@@ -11,9 +11,12 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 
 export CUDA_VISIBLE_DEVICES="$GPU"
 
-# GigaChat3 uses MLA (Multi-head Latent Attention) like DeepSeek-V2.
-# flash_attn does NOT support MLA — must use FLASHINFER.
-export VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-FLASHINFER}"
+# GigaChat3 uses MLA (Multi-head Latent Attention) like DeepSeek-V2/V3.
+# Generic backends (FLASH_ATTN, FLASHINFER) do NOT support MLA.
+# Must use MLA-specific backend. Priority on H200 (Hopper):
+#   FLASH_ATTN_MLA > FLASHMLA > FLASHINFER_MLA > TRITON_MLA
+# TRITON_MLA is the safest universal fallback.
+ATTN_BACKEND="${ATTN_BACKEND:-TRITON_MLA}"
 
 echo "=============================================="
 echo "  vLLM Server for GRPO Rollouts"
@@ -22,7 +25,7 @@ echo "  Model:       $MODEL"
 echo "  GPU:         $GPU"
 echo "  GPU util:    $GPU_UTIL"
 echo "  Max seq len: $MAX_MODEL_LEN"
-echo "  Attention:   $VLLM_ATTENTION_BACKEND"
+echo "  Attention:   $ATTN_BACKEND (MLA)"
 echo "  Port:        $PORT"
 echo "  URL:         http://localhost:${PORT}/v1"
 echo "=============================================="
@@ -38,4 +41,5 @@ python -m vllm.entrypoints.openai.api_server \
     --port "$PORT" \
     --gpu-memory-utilization "$GPU_UTIL" \
     --max-model-len "$MAX_MODEL_LEN" \
+    --attention-backend "$ATTN_BACKEND" \
     --disable-log-requests
