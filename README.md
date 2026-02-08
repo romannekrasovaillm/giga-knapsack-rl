@@ -251,6 +251,44 @@ python scripts/run_sft_main.py \
 
 KL penalty is **disabled by default** (`--kl-coef 0.0`) — no reference model loaded, saving ~20 GB. Enable with `--kl-coef 0.001` if needed (requires extra VRAM for ref model).
 
+### CPU Offload Mode
+
+When GPU memory is tight (e.g. `CUDA out of memory` during policy update), enable CPU offloading:
+
+```bash
+CPU_OFFLOAD=true bash scripts/run_grpo.sh
+```
+
+Or manually:
+```bash
+python scripts/run_grpo_main.py --cpu-offload --vllm-url http://localhost:8000/v1 ...
+```
+
+**How it works:**
+
+| Phase | Model | Optimizer | GPU used |
+|---|---|---|---|
+| vLLM generation | CPU | CPU | ~0 GB (free for vLLM KV cache) |
+| Log probs computation | GPU | CPU | ~20 GB (model only, no_grad) |
+| Forward + backward | GPU | CPU | ~55 GB (model + grads + activations) |
+| `optimizer.step()` | GPU | GPU | ~95 GB (model + grads + optimizer states) |
+
+Without CPU offload, all components stay on GPU simultaneously (~138 GB peak). With CPU offload, peak drops to ~95 GB during `optimizer.step()`, and vLLM gets exclusive GPU access during generation.
+
+**Recommended vLLM `gpu_util` with CPU offload:**
+
+| Config | vLLM VRAM | Trainer peak | Total | Fits H200? |
+|---|---|---|---|---|
+| `gpu_util=0.45` (default) | ~63 GB | ~95 GB | ~158 GB | No |
+| `gpu_util=0.30` | ~42 GB | ~95 GB | ~137 GB | Yes |
+| `gpu_util=0.25` | ~35 GB | ~95 GB | ~130 GB | Yes (safe) |
+
+```bash
+# Safe config with CPU offload
+GPU_MEMORY_UTILIZATION=0.30 bash scripts/run_vllm_server.sh
+CPU_OFFLOAD=true bash scripts/run_grpo.sh
+```
+
 ## Logging & Monitoring
 
 ### Terminal output
@@ -322,7 +360,7 @@ python scripts/run_grpo_main.py --use-wandb ...
 | `token_type_ids not used` | Already handled (auto-removed) |
 | `HFValidationError` on local paths | Already handled (auto-detected) |
 | GPU memory leaked after kill | `kill -9 $(nvidia-smi --query-compute-apps=pid --format=csv,noheader)` |
-| `CUDA out of memory` (trainer) | Reduce `--gpu-memory-utilization` in vLLM, or use HF fallback (no `--vllm-url`) |
+| `CUDA out of memory` (trainer) | Enable `--cpu-offload` + reduce `--gpu-memory-utilization 0.30` |
 
 ## Knapsack RL Algorithm
 

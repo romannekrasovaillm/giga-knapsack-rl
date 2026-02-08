@@ -56,6 +56,9 @@ TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-0.95}"
 MAX_ENV_STEPS="${MAX_ENV_STEPS:-8}"
 
+# Memory optimization
+CPU_OFFLOAD="${CPU_OFFLOAD:-false}"
+
 echo "=============================================="
 echo "  Knapsack-GRPO Training"
 echo "=============================================="
@@ -68,6 +71,7 @@ echo "  LR:             $LR"
 echo "  DAPO clip:      [1-$CLIP_RATIO, 1+$CLIP_RATIO_HIGH]"
 echo "  KL:             disabled (no ref model)"
 echo "  Exploration:    bias=$EXPLORATION_BIAS, entropy=$ENTROPY_COEF"
+echo "  CPU offload:    $CPU_OFFLOAD"
 if [ "$USE_VLLM" = true ]; then
 echo "  Generation:     vLLM @ $VLLM_URL"
 else
@@ -108,6 +112,10 @@ CMD=(
 
 if [ "$USE_VLLM" = true ]; then
     CMD+=(--vllm-url "$VLLM_URL")
+fi
+
+if [ "$CPU_OFFLOAD" = true ]; then
+    CMD+=(--cpu-offload)
 fi
 
 if [ -n "${MAX_SAMPLES:-}" ]; then

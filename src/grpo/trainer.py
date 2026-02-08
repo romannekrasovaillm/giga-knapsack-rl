@@ -112,6 +112,9 @@ class KnapsackGRPOTrainer:
         self.vllm_url = config.get("vllm_url", None)
         self.vllm_model_name = config.get("vllm_model_name", None)
 
+        # CPU offload config
+        self.cpu_offload = config.get("cpu_offload", False)
+
         # Output
         self.output_dir = Path(config.get("output_dir", "./checkpoints/grpo"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,6 +123,38 @@ class KnapsackGRPOTrainer:
 
     def _is_local_path(self, path: str) -> bool:
         return os.path.isdir(path)
+
+    # ──────────────────────────────────────────────────────────────
+    # CPU Offload
+    # ──────────────────────────────────────────────────────────────
+
+    def _move_optimizer_states(self, device):
+        """Move all optimizer state tensors to the given device."""
+        for state in self.optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device, non_blocking=True)
+
+    def _offload_to_cpu(self):
+        """Move policy model + optimizer states to CPU, freeing GPU memory."""
+        if not self.cpu_offload:
+            return
+        self.policy_model.to("cpu")
+        self._move_optimizer_states("cpu")
+        torch.cuda.empty_cache()
+        logger.info("CPU offload: policy model + optimizer → CPU")
+
+    def _onload_to_gpu(self, optimizer: bool = True):
+        """Move policy model (and optionally optimizer states) back to GPU."""
+        if not self.cpu_offload:
+            return
+        self.policy_model.to(self.device)
+        if optimizer:
+            self._move_optimizer_states(self.device)
+        logger.info(
+            f"CPU offload: policy model → GPU"
+            f"{' + optimizer' if optimizer else ''}"
+        )
 
     def setup(self):
         """Initialize all components."""
@@ -245,6 +280,8 @@ class KnapsackGRPOTrainer:
 
         logger.info(f"RLVR dataset: {len(self.dataset)} trajectories")
         logger.info(f"Difficulty: {self.dataset.get_difficulty_distribution()}")
+        if self.cpu_offload:
+            logger.info("CPU offload: ENABLED — model/optimizer move to CPU during generation")
         logger.info("Setup complete.")
 
     # ──────────────────────────────────────────────────────────────
@@ -255,13 +292,14 @@ class KnapsackGRPOTrainer:
         self.setup()
 
         gen_mode = f"vLLM ({self.vllm_url})" if self.vllm_generator else "HuggingFace"
+        offload_str = " + CPU offload" if self.cpu_offload else ""
         logger.info("=" * 60)
         logger.info("Starting Knapsack-GRPO Training")
         logger.info(f"  Iterations: {self.num_iterations}")
         logger.info(f"  Budget: {self.N_total}, N_low={self.N_low}, N_up={self.N_up}")
         logger.info(f"  Batch size: {self.batch_size} prompts")
         logger.info(f"  DAPO clip: [{1-self.clip_ratio:.2f}, {1+self.clip_ratio_high:.2f}]")
-        logger.info(f"  Generation: {gen_mode}")
+        logger.info(f"  Generation: {gen_mode}{offload_str}")
         logger.info("=" * 60)
 
         for iteration in range(1, self.num_iterations + 1):
@@ -295,10 +333,17 @@ class KnapsackGRPOTrainer:
             # 3. Generate rollouts
             t_gen = time.time()
             if self.vllm_generator:
+                # Offload policy model to CPU during vLLM generation
+                self._offload_to_cpu()
+
                 raw = self.vllm_generator.generate_rollouts(
                     prompt_texts, tools_jsons, tool_env_logs, budgets,
                     temperature=self.temperature, top_p=self.top_p,
                 )
+
+                # Onload model back (without optimizer — not needed for log_probs)
+                self._onload_to_gpu(optimizer=False)
+
                 rollout_data = self._compute_log_probs(
                     raw, prompt_texts, budgets,
                 )
@@ -324,7 +369,9 @@ class KnapsackGRPOTrainer:
                 reward_data, budgets,
             )
 
-            # 7. Policy update
+            # 7. Policy update (load optimizer states if offloaded)
+            if self.cpu_offload:
+                self._move_optimizer_states(self.device)
             t_upd = time.time()
             loss_metrics = self._update_policy(rollout_data, advantages, reward_data)
             update_time = time.time() - t_upd

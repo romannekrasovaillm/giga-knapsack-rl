@@ -58,6 +58,10 @@ def main():
     parser.add_argument("--vllm-model-name", default=None,
                         help="Model name on vLLM server (auto-detected if omitted)")
 
+    # Memory optimization
+    parser.add_argument("--cpu-offload", action="store_true",
+                        help="Offload policy model to CPU during vLLM generation to save GPU memory")
+
     # Data
     parser.add_argument("--data-cache-dir", default="./data/raw")
     parser.add_argument("--max-samples", type=int, default=None)
@@ -104,6 +108,7 @@ def main():
         "use_wandb": args.use_wandb,
         "vllm_url": args.vllm_url,
         "vllm_model_name": args.vllm_model_name,
+        "cpu_offload": args.cpu_offload,
         "device": "cuda",
     }
 
