@@ -105,6 +105,10 @@ class KnapsackGRPOTrainer:
         self.save_every = config.get("save_every", 50)
         self.log_dir = config.get("log_dir", "./logs")
 
+    def _is_local_path(self, path: str) -> bool:
+        """Check if path is a local directory (not a HF repo id)."""
+        return os.path.isdir(path)
+
     def setup(self):
         """Initialize all components."""
         logger.info("=" * 60)
@@ -113,8 +117,11 @@ class KnapsackGRPOTrainer:
 
         # Tokenizer
         logger.info(f"Loading tokenizer from {self.model_path}")
+        local_policy = self._is_local_path(self.model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_path, trust_remote_code=True,
+            self.model_path,
+            trust_remote_code=True,
+            local_files_only=local_policy,
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -129,15 +136,18 @@ class KnapsackGRPOTrainer:
             torch_dtype=dtype,
             trust_remote_code=True,
             attn_implementation=attn_impl,
+            local_files_only=local_policy,
         ).to(self.device)
 
         # Reference model (frozen)
         logger.info(f"Loading reference model from {self.ref_model_path}")
+        local_ref = self._is_local_path(self.ref_model_path)
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.ref_model_path,
             torch_dtype=dtype,
             trust_remote_code=True,
             attn_implementation=attn_impl,
+            local_files_only=local_ref,
         ).to(self.device)
         self.ref_model.eval()
         for p in self.ref_model.parameters():
