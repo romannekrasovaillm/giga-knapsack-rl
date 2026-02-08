@@ -41,6 +41,7 @@ from src.grpo.dapo_sampling import dapo_policy_loss, dynamic_temperature
 from src.grpo.policy_loss import knapsack_grpo_loss
 from src.metrics.tracker import MetricsTracker, compute_token_entropy
 from src.metrics.logger import TrainingLogger
+from src.utils import get_attn_implementation, get_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -120,20 +121,23 @@ class KnapsackGRPOTrainer:
 
         # Policy model
         logger.info(f"Loading policy model from {self.model_path}")
+        attn_impl = get_attn_implementation()
+        dtype = get_torch_dtype()
+
         self.policy_model = AutoModelForCausalLM.from_pretrained(
             self.model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
         ).to(self.device)
 
         # Reference model (frozen)
         logger.info(f"Loading reference model from {self.ref_model_path}")
         self.ref_model = AutoModelForCausalLM.from_pretrained(
             self.ref_model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_impl,
         ).to(self.device)
         self.ref_model.eval()
         for p in self.ref_model.parameters():

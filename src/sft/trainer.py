@@ -25,6 +25,7 @@ from transformers import (
 from src.data.loader import NemotronAgenticLoader
 from src.data.sft_dataset import SFTToolCallingDataset
 from src.metrics.logger import TrainingLogger
+from src.utils import get_attn_implementation, get_torch_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +85,9 @@ class SFTWarmupTrainer:
 
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=get_torch_dtype(),
             trust_remote_code=True,
-            attn_implementation="flash_attention_2",
+            attn_implementation=get_attn_implementation(),
         )
         self.model.to(self.device)
 
